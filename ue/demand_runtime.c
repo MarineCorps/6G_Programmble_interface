@@ -7,9 +7,25 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+
+/* demand 패킷의 기본 목적지.
+ *
+ * 중요: 이 주소로 가는 경로가 *5G PDU 세션*을 타야 gNB 의 PDCP UL hook 이
+ * 패킷을 본다. 다른 NIC 로 빠지면 shim 이 조용히 아무 일도 하지 않는다
+ * (전송은 성공하고 gNB 는 못 본다 — 가장 디버깅하기 어려운 실패 모드).
+ *
+ * 아래 기본값은 실험용 reserved endpoint 라서 보통 라우팅되지 않는다.
+ * 실제 사용 시 DEMAND_DST_IP 환경변수로 5GC 쪽 주소를 지정할 것.
+ *   예) DEMAND_DST_IP=192.168.70.135
+ *
+ * 48888 을 listen 하는 서버는 필요 없다. gNB 가 UPF 로 포워딩하기 전에
+ * 이미 후킹하므로 목적지에서 패킷이 버려져도 무관하다.
+ */
+#define DEMAND6_DEFAULT_DST_IP  "10.99.0.1"
 
 /* ── 전역 변수 ──────────────────────────────────────────────────
  * demand 메시지를 보내는 데 사용될 UDP 소켓의 파일 디스크립터.
@@ -40,15 +56,26 @@ int demand_runtime_init(void)
     g_demand_dst.sin_family = AF_INET;
     g_demand_dst.sin_port   = htons(DEMAND6_DST_PORT);
 
-    /*
-     * 이 IP는 실험용 reserved endpoint.
-     * 실제로는 Linux routing 상 wwan0 로 나가도록 잡아야 함.
-     */
-    if (inet_pton(AF_INET, "10.99.0.1", &g_demand_dst.sin_addr) != 1) {
+    /* 목적지는 DEMAND_DST_IP 로 주입한다. 미설정이면 경고를 남기고
+     * 기본값으로 떨어진다 — 조용히 실패하지 않게 하는 것이 요점이다. */
+    const char *dst_ip = getenv("DEMAND_DST_IP");
+    if (!dst_ip) {
+        dst_ip = DEMAND6_DEFAULT_DST_IP;
+        fprintf(stderr,
+                "[demand] DEMAND_DST_IP 미설정 → 기본값 %s 사용. "
+                "이 주소가 5G PDU 세션으로 라우팅되지 않으면 gNB 가 "
+                "demand 패킷을 보지 못한다.\n",
+                dst_ip);
+    }
+
+    if (inet_pton(AF_INET, dst_ip, &g_demand_dst.sin_addr) != 1) {
+        fprintf(stderr, "[demand] DEMAND_DST_IP 파싱 실패: '%s'\n", dst_ip);
         close(g_demand_sock);
         g_demand_sock = -1;
         return -1;
     }
+
+    fprintf(stderr, "[demand] side-channel → %s:%u\n", dst_ip, DEMAND6_DST_PORT);
 
     g_initialized = 1;
     return 0;
